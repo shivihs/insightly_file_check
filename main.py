@@ -8,6 +8,15 @@ import io
 
 app = FastAPI()
 
+class FileUtils:
+    @staticmethod
+    def decode_content(content: bytes) -> str:
+        """Bezpieczne dekodowanie bajtów na string (UTF-8 z fallbackiem na Latin-1)"""
+        try:
+            return content.decode('utf-8')
+        except UnicodeDecodeError:
+            return content.decode('latin-1')
+
 class FileLoader:
     @staticmethod
     def _convert_to_serializable(value: Any) -> Any:
@@ -32,10 +41,7 @@ class FileLoader:
             await file.seek(0)  # Reset pozycji pliku
             
             # Próba dekodowania
-            try:
-                decoded_content = content.decode('utf-8')
-            except UnicodeDecodeError:
-                decoded_content = content.decode('latin-1')
+            decoded_content = FileUtils.decode_content(content)
             
             file_info = {
                 "filename": file.filename,
@@ -142,10 +148,7 @@ class FileValidator:
             file.file.seek(0)
             
             # Próba dekodowania
-            try:
-                decoded_content = content.decode('utf-8')
-            except UnicodeDecodeError:
-                decoded_content = content.decode('latin-1')
+            decoded_content = FileUtils.decode_content(content)
             
             # Próba wczytania jako DataFrame
             df = pd.read_csv(io.StringIO(decoded_content))
@@ -172,10 +175,7 @@ class FileValidator:
             file.file.seek(0)
             
             # Próba dekodowania
-            try:
-                decoded_content = content.decode('utf-8')
-            except UnicodeDecodeError:
-                decoded_content = content.decode('latin-1')
+            decoded_content = FileUtils.decode_content(content)
             
             # Próba parsowania JSON
             json_data = json.loads(decoded_content)
