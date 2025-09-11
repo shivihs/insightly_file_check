@@ -1,10 +1,103 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
+from typing import Dict, Any, Optional
 import pandas as pd
+import numpy as np
 import json
 import io
 
 app = FastAPI()
+
+class FileLoader:
+    @staticmethod
+    def _convert_to_serializable(value: Any) -> Any:
+        """Konwertuje wartości na format możliwy do serializacji JSON"""
+        if isinstance(value, (pd.Timestamp, pd.Timedelta)):
+            return str(value)
+        elif isinstance(value, (np.int64, np.float64)):
+            return int(value) if isinstance(value, np.int64) else float(value)
+        elif isinstance(value, dict):
+            return {k: FileLoader._convert_to_serializable(v) for k, v in value.items()}
+        elif isinstance(value, (list, tuple)):
+            return [FileLoader._convert_to_serializable(v) for v in value]
+        elif pd.isna(value):
+            return None
+        return value
+
+    @classmethod
+    async def load_file(cls, file: UploadFile) -> Dict[str, Any]:
+        """Wczytuje plik i zwraca jego zawartość w ujednoliconym formacie"""
+        try:
+            content = await file.read()
+            await file.seek(0)  # Reset pozycji pliku
+            
+            # Próba dekodowania
+            try:
+                decoded_content = content.decode('utf-8')
+            except UnicodeDecodeError:
+                decoded_content = content.decode('latin-1')
+            
+            file_info = {
+                "filename": file.filename,
+                "content_type": file.content_type,
+                "size": len(content)
+            }
+            
+            if file.filename.lower().endswith('.csv'):
+                df = pd.read_csv(io.StringIO(decoded_content))
+                data = df.head(100).to_dict('records')  # Limit do 100 wierszy dla podglądu
+                data = [
+                    {k: cls._convert_to_serializable(v) for k, v in row.items()}
+                    for row in data
+                ]
+                
+                return {
+                    "file_info": file_info,
+                    "data": data,
+                    "metadata": {
+                        "total_rows": len(df),
+                        "total_columns": len(df.columns),
+                        "columns": list(df.columns),
+                        "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
+                        "memory_usage": df.memory_usage(deep=True).sum() / 1024  # KB
+                    }
+                }
+                
+            elif file.filename.lower().endswith('.json'):
+                json_data = json.loads(decoded_content)
+                
+                if isinstance(json_data, list):
+                    # Konwersja listy obiektów
+                    preview_data = json_data[:100]  # Limit do 100 elementów
+                    df = pd.DataFrame.from_records(preview_data)
+                else:
+                    # Konwersja pojedynczego obiektu
+                    df = pd.DataFrame([json_data])
+                    preview_data = json_data
+                
+                return {
+                    "file_info": file_info,
+                    "data": cls._convert_to_serializable(preview_data),
+                    "metadata": {
+                        "total_rows": len(df),
+                        "total_columns": len(df.columns),
+                        "columns": list(df.columns),
+                        "structure_type": "list" if isinstance(json_data, list) else "dict",
+                        "memory_usage": df.memory_usage(deep=True).sum() / 1024  # KB
+                    }
+                }
+            
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Nieobsługiwany format pliku. Obsługiwane: .csv, .json"
+                )
+                
+        except Exception as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Błąd wczytywania pliku: {str(e)}"
+            )
 
 class FileValidator:
     MAX_FILE_SIZE = 20 * 1024 * 1024  # 20 MB
@@ -72,7 +165,7 @@ class FileValidator:
     
     @classmethod
     def validate_json_content(cls, file: UploadFile) -> dict:
-        """Walidacja zawartości JSON"""
+        """Walidacja zawartości JSON - akceptuje tylko struktury konwertowalne do DataFrame"""
         try:
             file.file.seek(0)
             content = file.file.read()
@@ -91,30 +184,43 @@ class FileValidator:
             if not json_data:
                 return {"valid": False, "message": "Plik JSON jest pusty"}
             
-            # Podstawowe informacje o strukturze JSON
-            data_type = type(json_data).__name__
-            
-            if isinstance(json_data, dict):
-                keys_count = len(json_data.keys())
+            # Sprawdzenie struktury JSON
+            if isinstance(json_data, list):
+                # Lista musi zawierać słowniki
+                if not json_data or not all(isinstance(item, dict) for item in json_data):
+                    return {
+                        "valid": False,
+                        "message": "JSON musi być listą obiektów (słowników)"
+                    }
                 return {
                     "valid": True,
                     "message": "Zawartość JSON OK",
-                    "type": data_type,
-                    "keys": keys_count
+                    "type": "list",
+                    "items": len(json_data)
                 }
-            elif isinstance(json_data, list):
-                items_count = len(json_data)
+            elif isinstance(json_data, dict):
+                # Słownik musi mieć proste wartości lub listy prostych wartości
+                for value in json_data.values():
+                    if isinstance(value, dict):
+                        return {
+                            "valid": False,
+                            "message": "JSON nie może zawierać zagnieżdżonych obiektów"
+                        }
+                    if isinstance(value, list) and any(isinstance(item, (dict, list)) for item in value):
+                        return {
+                            "valid": False,
+                            "message": "Listy w JSON nie mogą zawierać złożonych struktur"
+                        }
                 return {
                     "valid": True,
                     "message": "Zawartość JSON OK",
-                    "type": data_type,
-                    "items": items_count
+                    "type": "dict",
+                    "keys": len(json_data.keys())
                 }
             else:
                 return {
-                    "valid": True,
-                    "message": "Zawartość JSON OK",
-                    "type": data_type
+                    "valid": False,
+                    "message": "JSON musi być obiektem lub listą obiektów"
                 }
             
         except json.JSONDecodeError as e:
@@ -199,6 +305,29 @@ async def validate_auto(file: UploadFile = File(...)):
             status_code=400, 
             detail="Nieobsługiwany format pliku. Obsługiwane: .csv, .json"
         )
+
+@app.post("/upload")
+async def upload_file(file: UploadFile = File(...)):
+    """
+    Wczytuje i przetwarza plik CSV lub JSON.
+    Zwraca ujednolicony format danych zawierający:
+    - Informacje o pliku
+    - Podgląd danych (do 100 wierszy)
+    - Metadane (liczba wierszy, kolumn, typy danych itp.)
+    """
+    # Walidacja rozmiaru
+    size_result = FileValidator.validate_file_size(file)
+    if not size_result["valid"]:
+        raise HTTPException(status_code=400, detail=size_result["message"])
+    
+    # Wczytanie i przetworzenie pliku
+    result = await FileLoader.load_file(file)
+    
+    return JSONResponse(content={
+        "status": "success",
+        "message": "Plik wczytany pomyślnie",
+        **result
+    })
 
 @app.get("/health")
 async def health_check():

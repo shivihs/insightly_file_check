@@ -1,0 +1,11 @@
+// Zagnieżdżone obiekty
+{
+  "name": "Jan",
+  "address": {"city": "Warsaw"}  // Błąd: zagnieżdżony obiekt
+}
+
+// Lista z zagnieżdżonymi strukturami
+{
+  "name": "Jan",
+  "scores": [{"test": 1}, {"test": 2}]  // Błąd: lista obiektów
+}
