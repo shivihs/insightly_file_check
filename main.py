@@ -1,14 +1,21 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from typing import Dict, Any, Optional
 import pandas as pd
 import numpy as np
 import json
 import io
+import os
+import uuid
 
 app = FastAPI()
 
+STORAGE_DIR = "storage"
+os.makedirs(STORAGE_DIR, exist_ok=True)
+
 class FileUtils:
+    COMMON_SEPARATORS = [',', ';', '\t', '|']
+
     @staticmethod
     def decode_content(content: bytes) -> str:
         """Bezpieczne dekodowanie bajtów na string (UTF-8 z fallbackiem na Latin-1)"""
@@ -16,6 +23,46 @@ class FileUtils:
             return content.decode('utf-8')
         except UnicodeDecodeError:
             return content.decode('latin-1')
+    
+    @classmethod
+    def detect_csv_separator(cls, content: str) -> str:
+        """Wykrywa separator w pliku CSV"""
+        # Weź pierwsze kilka linii do analizy
+        sample_lines = content.split('\n')[:5]
+        if not sample_lines:
+            return ','
+        
+        # Zlicz wystąpienia każdego separatora w każdej linii
+        separator_counts = {sep: [] for sep in cls.COMMON_SEPARATORS}
+        
+        for line in sample_lines:
+            if not line.strip():  # Pomijamy puste linie
+                continue
+            for sep in cls.COMMON_SEPARATORS:
+                count = line.count(sep)
+                if count > 0:  # Zliczamy tylko jeśli separator występuje
+                    separator_counts[sep].append(count)
+        
+        # Znajdź separator z najbardziej spójną liczbą wystąpień
+        best_separator = ','  # domyślny separator
+        best_consistency = 0
+        
+        for sep, counts in separator_counts.items():
+            if not counts:  # Pomijamy separatory, które nie wystąpiły
+                continue
+            
+            # Sprawdź czy liczba kolumn jest spójna
+            if len(set(counts)) == 1 and counts[0] > 0:
+                # Jeśli znaleźliśmy separator z jednakową liczbą wystąpień > 0
+                return sep
+            
+            # Alternatywnie, weź separator z największą średnią wystąpień
+            avg_count = sum(counts) / len(counts) if counts else 0
+            if avg_count > best_consistency:
+                best_consistency = avg_count
+                best_separator = sep
+        
+        return best_separator
 
 class FileLoader:
     @staticmethod
@@ -50,13 +97,15 @@ class FileLoader:
             }
             
             if file.filename.lower().endswith('.csv'):
-                df = pd.read_csv(io.StringIO(decoded_content))
-                data = df.head(100).to_dict('records')  # Limit do 100 wierszy dla podglądu
+                # Wykryj separator i wczytaj plik
+                separator = FileUtils.detect_csv_separator(decoded_content)
+                df = pd.read_csv(io.StringIO(decoded_content), sep=separator)
+                data = df.head(10).to_dict('records')  # Limit do 100 wierszy dla podglądu
                 data = [
                     {k: cls._convert_to_serializable(v) for k, v in row.items()}
                     for row in data
                 ]
-                
+            
                 return {
                     "file_info": file_info,
                     "data": data,
@@ -151,7 +200,9 @@ class FileValidator:
             decoded_content = FileUtils.decode_content(content)
             
             # Próba wczytania jako DataFrame
-            df = pd.read_csv(io.StringIO(decoded_content))
+            # Wykryj separator i wczytaj plik
+            separator = FileUtils.detect_csv_separator(decoded_content)
+            df = pd.read_csv(io.StringIO(decoded_content), sep=separator)
             
             if df.empty:
                 return {"valid": False, "message": "Plik CSV jest pusty"}
@@ -323,9 +374,20 @@ async def upload_file(file: UploadFile = File(...)):
     # Wczytanie i przetworzenie pliku
     result = await FileLoader.load_file(file)
     
+    # Wygeneruj unikalny ID
+    file_id = str(uuid.uuid4())
+    storage_path = os.path.join(STORAGE_DIR, f"{file_id}_{file.filename}")
+
+    # Zapis pliku do storage
+    content = await file.read()
+    with open(storage_path, "wb") as f:
+        f.write(content)
+    await file.seek(0)  # reset dla dalszego przetwarzania
+
     return JSONResponse(content={
         "status": "success",
         "message": "Plik wczytany pomyślnie",
+        "file_id": file_id,
         **result
     })
 
@@ -333,3 +395,13 @@ async def upload_file(file: UploadFile = File(...)):
 async def health_check():
     """Health check"""
     return {"status": "OK"}
+
+@app.get("/download/{file_id}")
+async def download_file(file_id: str):
+    """Zwraca plik z storage na podstawie file_id"""
+    for fname in os.listdir(STORAGE_DIR):
+        if fname.startswith(file_id + "_"):
+            file_path = os.path.join(STORAGE_DIR, fname)
+            return FileResponse(file_path, filename=fname.split("_", 1)[1])
+    raise HTTPException(status_code=404, detail="Plik nie znaleziony")
+

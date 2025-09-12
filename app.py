@@ -48,18 +48,18 @@ def load_file_from_api(uploaded_file):
             # Tworzenie DataFrame z otrzymanych danych
             df = pd.DataFrame(result["data"])
             file_type = "csv" if uploaded_file.name.lower().endswith('.csv') else "json"
-            
-            return df, file_type, result["metadata"]
+            file_id = result["file_id"]
+            return df, file_type, file_id, result["metadata"]
         else:
             st.error(f"Błąd API: {response.json().get('detail', 'Nieznany błąd')}")
-            return None, None, None
+            return None, None, None, None
             
     except requests.exceptions.ConnectionError:
         st.error("Nie można połączyć się z API. Sprawdź czy FastAPI działa na localhost:8000")
-        return None, None, None
+        return None, None, None, None
     except Exception as e:
         st.error(f"Błąd: {str(e)}")
-        return None, None, None
+        return None, None, None, None
 
 def show_file_info(df, file_type, validation_data):
     """Prezentacja informacji o pliku"""
@@ -105,6 +105,7 @@ def main():
             st.write(f"**Rozmiar:** {uploaded_file.size / 1024:.1f} KB")
         with col2:
             st.write(f"**Typ:** {uploaded_file.type}")
+
         
         # Walidacja przez API
         st.subheader("🔍 Walidacja")
@@ -120,7 +121,7 @@ def main():
             
             # Wczytanie przez API
             uploaded_file.seek(0)  # Reset pozycji pliku
-            df, file_type, metadata = load_file_from_api(uploaded_file)
+            df, file_type, file_id, metadata = load_file_from_api(uploaded_file)
             
             if df is not None and metadata is not None:
                 # Informacje o danych
@@ -131,7 +132,7 @@ def main():
                 with col1:
                     st.metric("Typ pliku", file_type.upper())
                     st.metric("Całkowita liczba wierszy", metadata["total_rows"])
-                
+                    st.write(f"**ID:** {file_id}")
                 with col2:
                     st.metric("Liczba kolumn", metadata["total_columns"])
                     st.metric("Rozmiar w pamięci", f"{metadata['memory_usage']:.1f} KB")
@@ -181,7 +182,7 @@ def main():
                     st.dataframe(info_df, use_container_width=True)
                 
                 # Opcja pobrania
-                st.subheader("💾 Export")
+                st.subheader("💾 Export do CSV (tylko dla JSON)")
                 if file_type == "json":
                     csv_data = df.to_csv(index=False)
                     st.download_button(
@@ -190,6 +191,26 @@ def main():
                         file_name=f"{uploaded_file.name.rsplit('.', 1)[0]}.csv",
                         mime="text/csv"
                     )
+                st.subheader("💾 Pobierz plik z API")
+                if st.button("Wczytaj plik ze storage"):
+                    dl_response = requests.get(f"{API_URL}/download/{file_id}")
+                    if dl_response.status_code == 200:
+                        st.success("✅ Plik wczytany pomyślnie")
+                        # Pobierz oryginalną nazwę pliku z response headers lub użyj domyślnej
+                        original_filename = dl_response.headers.get('content-disposition', '')
+                        if 'filename=' in original_filename:
+                            filename = original_filename.split('filename=')[1].strip('"')
+                        else:
+                            filename = "no_name.csv"
+                        
+                        st.download_button(
+                            "Zapisz plik lokalnie",
+                            dl_response.content,
+                            file_name=filename,
+                            mime="text/csv" if filename.endswith('.csv') else "application/json" if filename.endswith('.json') else "application/octet-stream"
+                        )
+                    else:
+                        st.error("❌ Nie udało się pobrać pliku")
         else:
             # Błąd walidacji
             st.error(f"❌ Błąd walidacji: {validation_result['error']}")
