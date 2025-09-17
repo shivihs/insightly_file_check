@@ -7,11 +7,35 @@ import json
 import io
 import os
 import uuid
+import time
 
 app = FastAPI()
 
-STORAGE_DIR = "storage"
+@app.on_event("startup")
+async def startup_event():
+    """Wykonaj czyszczenie przy starcie aplikacji"""
+    cleanup_old_files()
+
+# Ścieżka do katalogu storage względem lokalizacji main.py
+STORAGE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "storage")
 os.makedirs(STORAGE_DIR, exist_ok=True)
+
+# Czyszczenie starych plików przy starcie (opcjonalne)
+def cleanup_old_files(max_age_hours=24):
+    """Usuwa pliki starsze niż max_age_hours"""
+    try:
+        current_time = time.time()
+        for fname in os.listdir(STORAGE_DIR):
+            fpath = os.path.join(STORAGE_DIR, fname)
+            if os.path.isfile(fpath):
+                # Usuń jeśli plik jest starszy niż max_age_hours
+                if current_time - os.path.getmtime(fpath) > max_age_hours * 3600:
+                    try:
+                        os.remove(fpath)
+                    except:
+                        pass  # Ignoruj błędy usuwania
+    except:
+        pass  # Ignoruj błędy podczas czyszczenia
 
 class FileUtils:
     COMMON_SEPARATORS = [',', ';', '\t', '|']
